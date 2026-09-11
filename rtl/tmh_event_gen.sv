@@ -1,238 +1,473 @@
-// SPDX-License-Identifier: Apache-2.0
+// Copyright ...
 //
-// Consolidated TMH event-generation datapath -- classify, track, and match
-// merged into a single module. Same external module name, parameters, and
-// ports as the original tmh_event_gen.sv, so this is a drop-in replacement:
-// it plugs into cva6_tmh_perf_top.sv, tb/tb_tmh_event_gen.sv, and
-// tmh_event_gen_dut.sv completely unchanged.
+// tmh_event_gen.sv
 //
-// Replaces FOUR files with this ONE:
-//   tmh_instr_classifier.sv, tmh_sequence_tracker.sv,
-//   tmh_sequence_matcher.sv, tmh_event_gen.sv (the old thin wrapper)
+// Tailor-Made Hardware Performance Counter (TMH) event generator
 //
-// Nothing about the logic changed in this merge -- each stage below is the
-// original submodule's always_comb/always_ff block, pasted in verbatim,
-// with only the wires between stages renamed (see NOTE below). Two
-// combinational blocks feeding each other settle to the same fixed point
-// whether or not there's a module boundary between them, so removing the
-// boundaries does not change behavior.
+// Detects consecutive retired instruction-class pairs:
 //
-// NOTE / bug fixed while merging: the original tmh_event_gen.sv declared a
-// local signal named `class` (tmh_class_e [NrCommitPorts-1:0] class;).
-// `class` is a reserved SystemVerilog keyword (IEEE 1800, `class...
-// endclass`), not a legal plain identifier -- every conformant tool
-// (Verilator, Icarus, VCS, Questa, Xcelium) lexes it specially regardless
-// of context, so that file would not have compiled as-is. Renamed to
-// `instr_class` / `instr_class_valid` here; nothing else changes.
+//      B = Branch / Jump
+//      L = Load
+//      S = Store
+//      A = Arithmetic
+//      N = Boolean
 //
-// Pipeline (now three always blocks in one module instead of three module
-// instances):
+// Generates all 25 possible two-instruction sequences:
 //
-//   commit_instr_i / commit_ack_i
-//               |
-//               v
-//   [stage 1, comb]   classify each committed instruction (was tmh_instr_classifier)
-//               |
-//               v
-//   [stage 2, seq]    pair with the previous class, one history register
-//                     (was tmh_sequence_tracker -- the ONLY state in this module)
-//               |
-//               v
-//   [stage 3, comb]   count LL / AN / AS matches this cycle (was tmh_sequence_matcher)
-//               |
-//               v
-//          tmh_inc_o
+//      BB BL BS BA BN
+//      LB LL LS LA LN
+//      SB SL SS SA SN
+//      AB AL AS AA AN
+//      NB NL NS NA NN
+//
+// IMPORTANT:
+//   * Only architecturally committed instructions are observed.
+//   * commit ports are processed in retirement order.
+//   * Multiple occurrences of the same TMH can happen in one cycle.
+//     Example:
+//          previous = L
+//          port0    = L
+//          port1    = L
+//
+//     => LL occurs twice in the same cycle.
+//   * Therefore tmh_inc_o is an increment value, not simply a 1-bit pulse.
+//
 
 module tmh_event_gen
   import ariane_pkg::*;
   import tmh_pkg::*;
 #(
-    parameter int unsigned NrCommitPorts = 1,
-    parameter type scoreboard_entry_t    = logic,
+    parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
 
+    // Scoreboard entry type from CVA6
+    parameter type scoreboard_entry_t = logic,
+
+    // Width required to represent 0 .. NrCommitPorts occurrences.
+    //
+    // NrCommitPorts = 1 -> width 1
+    // NrCommitPorts = 2 -> width 2, can represent 0/1/2
     parameter int unsigned TmhIncWidth =
-      (NrCommitPorts <= 1) ? 1 : $clog2(NrCommitPorts + 1)
+        (CVA6Cfg.NrCommitPorts <= 1)
+            ? 1
+            : $clog2(CVA6Cfg.NrCommitPorts + 1)
 ) (
+
     input logic clk_i,
     input logic rst_ni,
 
+    // ------------------------------------------------------------
+    // Commit interface from CVA6 scoreboard / commit stage
+    // ------------------------------------------------------------
+
+    input scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0]
+        commit_instr_i,
+
+    input logic [CVA6Cfg.NrCommitPorts-1:0]
+        commit_ack_i,
+
+    // ------------------------------------------------------------
+    // Explicit sequence-history clear
+    //
+    // Can later be asserted at:
+    //   * beginning of a sampling window
+    //   * process/context boundary
+    //   * software-controlled TMH reset
+    //
+    // If not used yet, tie this input to 1'b0.
+    // ------------------------------------------------------------
+
     input logic clear_history_i,
 
-    input scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_i,
-    input logic              [NrCommitPorts-1:0] commit_ack_i,
+    // ------------------------------------------------------------
+    // TMH event increments
+    //
+    // tmh_inc_o[TMH_LL] = number of LL occurrences this cycle
+    // tmh_inc_o[TMH_AN] = number of AN occurrences this cycle
+    // ...
+    //
+    // Each entry can be 0 .. CVA6Cfg.NrCommitPorts.
+    // ------------------------------------------------------------
 
-    output logic [TMH_NUM_EVENTS-1:0][TmhIncWidth-1:0] tmh_inc_o
+    output logic [TmhIncWidth-1:0]
+        tmh_inc_o [TMH_NUM_PAIRS]
+
 );
 
-  // --------------------------------------------------------------------------
-  // Stage 1 (combinational) -- was tmh_instr_classifier.sv, unchanged logic.
-  // Maps each committed instruction to the five-class B/L/S/A/N alphabet.
-  // --------------------------------------------------------------------------
-  function automatic logic is_boolean_op(input fu_op op);
-    unique case (op)
-      XORL, ORL, ANDL: return 1'b1;
-      default:         return 1'b0;
-    endcase
-  endfunction
 
-  function automatic tmh_class_e classify_instr(input scoreboard_entry_t instr);
-    // Memory classes have highest priority and are identified by FU.
-    if (instr.fu == LOAD) begin
-      return TMH_CLASS_LOAD;
-    end
+    // ============================================================
+    // Internal sequence-history registers
+    // ============================================================
 
-    if (instr.fu == STORE) begin
-      return TMH_CLASS_STORE;
-    end
+    tmh_class_e history_class_q;
+    tmh_class_e history_class_d;
 
-    // Control-flow instructions are the branch/jump class.
-    if (instr.fu == CTRL_FLOW) begin
-      return TMH_CLASS_BRANCH;
-    end
+    logic history_valid_q;
+    logic history_valid_d;
 
-    // Integer ALU and multiply instructions are either Boolean or arithmetic.
-    if ((instr.fu == ALU) || (instr.fu == MULT)) begin
-      if ((instr.fu == ALU) && is_boolean_op(instr.op)) begin
-        return TMH_CLASS_BOOL;
-      end
-      return TMH_CLASS_ARITH;
-    end
 
-    // CSR, FPU, accelerator, etc. are outside the initial five-class alphabet.
-    return TMH_CLASS_NONE;
-  endfunction
+    // ============================================================
+    // Boolean instruction classifier
+    // ============================================================
+    //
+    // For the first implementation we treat the basic RISC-V
+    // logical operations as Boolean instructions.
+    //
+    // Other ALU instructions are classified as arithmetic.
+    //
+    // We can extend this later for RVB instructions if required.
+    // ============================================================
 
-  // Renamed from the original's `class` / `class_valid` -- see header note.
-  tmh_class_e [NrCommitPorts-1:0] instr_class;
-  logic       [NrCommitPorts-1:0] instr_class_valid;
+    function automatic logic is_boolean_op(
+        input ariane_pkg::fu_op op_i
+    );
 
-  always_comb begin : p_classify
-    instr_class       = '{default: TMH_CLASS_NONE};
-    instr_class_valid = '0;
+        begin
 
-    for (int unsigned p = 0; p < NrCommitPorts; p++) begin
-      // commit_ack_i is the authoritative "this instruction retired" signal.
-      instr_class_valid[p] = commit_ack_i[p];
+            unique case (op_i)
 
-      if (commit_ack_i[p]) begin
-        instr_class[p] = classify_instr(commit_instr_i[p]);
-      end
-    end
-  end
+                XORL,
+                ORL,
+                ANDL:
+                    is_boolean_op = 1'b1;
 
-  // --------------------------------------------------------------------------
-  // Stage 2 (sequential) -- was tmh_sequence_tracker.sv, unchanged logic.
-  // This is the ONLY state this module adds: one history register.
-  // Blocking updates of history_class_d/history_valid_d inside the for loop
-  // are INTENTIONAL -- they let port p+1 observe port p as its immediate
-  // predecessor within the same cycle.
-  // --------------------------------------------------------------------------
-  tmh_class_e history_class_q, history_class_d;
-  logic       history_valid_q, history_valid_d;
+                default:
+                    is_boolean_op = 1'b0;
 
-  tmh_class_e [NrCommitPorts-1:0] pair_prev;
-  tmh_class_e [NrCommitPorts-1:0] pair_curr;
-  logic       [NrCommitPorts-1:0] pair_valid;
+            endcase
 
-  always_comb begin : p_track
-    // Hold history by default.
-    history_class_d = history_class_q;
-    history_valid_d = history_valid_q;
+        end
 
-    // No pair is valid unless explicitly formed below.
-    pair_prev  = '{default: TMH_CLASS_NONE};
-    pair_curr  = '{default: TMH_CLASS_NONE};
-    pair_valid = '0;
+    endfunction
 
-    if (clear_history_i) begin
-      history_class_d = TMH_CLASS_NONE;
-      history_valid_d = 1'b0;
-    end else begin
-      for (int unsigned p = 0; p < NrCommitPorts; p++) begin
-        if (instr_class_valid[p]) begin
 
-          if (instr_class[p] == TMH_CLASS_NONE) begin
-            // A committed instruction outside the alphabet interrupts an
-            // immediate sequence. Example: LOAD -> CSR -> LOAD is not LL.
-            history_class_d = TMH_CLASS_NONE;
+    // ============================================================
+    // Instruction classifier
+    // ============================================================
+    //
+    // Converts a retired CVA6 scoreboard entry into:
+    //
+    //          B / L / S / A / N
+    //
+    // Unsupported instruction classes return TMH_NONE.
+    //
+    // Classification priority is important.
+    //
+    // For example a JAL may internally use an ADD-like operation,
+    // but its functional unit is CTRL_FLOW, so it must be B.
+    // ============================================================
+
+    function automatic tmh_class_e classify_instr(
+        input scoreboard_entry_t instr_i
+    );
+
+        begin
+
+            unique case (instr_i.fu)
+
+                // ------------------------------------------------
+                // Branch / jump
+                // ------------------------------------------------
+                CTRL_FLOW:
+                    classify_instr = TMH_B;
+
+
+                // ------------------------------------------------
+                // Load
+                // ------------------------------------------------
+                LOAD:
+                    classify_instr = TMH_L;
+
+
+                // ------------------------------------------------
+                // Store
+                // ------------------------------------------------
+                STORE:
+                    classify_instr = TMH_S;
+
+
+                // ------------------------------------------------
+                // Integer ALU
+                //
+                // Separate Boolean operations from the remaining
+                // arithmetic/ALU operations.
+                // ------------------------------------------------
+                ALU: begin
+
+                    if (is_boolean_op(instr_i.op))
+                        classify_instr = TMH_N;
+                    else
+                        classify_instr = TMH_A;
+
+                end
+
+
+                // ------------------------------------------------
+                // Multiply / divide operations
+                //
+                // Count these as arithmetic.
+                // ------------------------------------------------
+                MULT:
+                    classify_instr = TMH_A;
+
+
+                // ------------------------------------------------
+                // Everything else currently lies outside our
+                // B/L/S/A/N classification.
+                //
+                // Examples:
+                //      CSR
+                //      FPU
+                //      FPU_VEC
+                //      CVXIF
+                //      ACCEL
+                //      AES
+                // ------------------------------------------------
+                default:
+                    classify_instr = TMH_NONE;
+
+            endcase
+
+        end
+
+    endfunction
+
+
+    // ============================================================
+    // TMH sequence detection
+    // ============================================================
+    //
+    // The fundamental operation is:
+    //
+    //      previous instruction class -> current instruction class
+    //
+    // Example:
+    //
+    //      previous = A
+    //      current  = N
+    //
+    //              AN += 1
+    //
+    //
+    // Multiple commit ports are processed sequentially inside the
+    // combinational next-state logic.
+    //
+    // Example:
+    //
+    //      history before cycle = A
+    //
+    //      commit port 0 = N
+    //      commit port 1 = L
+    //
+    //      resulting sequences:
+    //
+    //          A -> N     => AN
+    //          N -> L     => NL
+    //
+    //      final history = L
+    //
+    // ============================================================
+
+    always_comb begin : p_tmh_sequence_detection
+
+        tmh_class_e current_class;
+        int unsigned pair_idx;
+
+        // --------------------------------------------------------
+        // Default outputs
+        // --------------------------------------------------------
+
+        tmh_inc_o = '{default: '0};
+
+        // Hold history unless something retires
+        history_class_d = history_class_q;
+        history_valid_d = history_valid_q;
+
+
+        // --------------------------------------------------------
+        // Explicit history clear
+        // --------------------------------------------------------
+
+        if (clear_history_i) begin
+
+            history_class_d = TMH_NONE;
             history_valid_d = 1'b0;
 
-          end else begin
-            if (history_valid_d) begin
-              pair_prev[p]  = history_class_d;
-              pair_curr[p]  = instr_class[p];
-              pair_valid[p] = 1'b1;
+        end else begin
+
+            // ----------------------------------------------------
+            // Process retirement ports IN ORDER.
+            //
+            // Port 0 must be processed before port 1.
+            //
+            // We intentionally use history_class_d here instead
+            // of history_class_q because history_class_d is
+            // updated immediately after processing each port.
+            //
+            // Therefore:
+            //
+            //      old history -> port0 -> port1
+            //
+            // can all be observed in a single clock cycle.
+            // ----------------------------------------------------
+
+            for (
+                int unsigned p = 0;
+                p < CVA6Cfg.NrCommitPorts;
+                p++
+            ) begin
+
+                // ------------------------------------------------
+                // Only architecturally committed instructions
+                // participate.
+                // ------------------------------------------------
+
+                if (commit_ack_i[p]) begin
+
+                    current_class =
+                        classify_instr(commit_instr_i[p]);
+
+
+                    // ============================================
+                    // Unsupported instruction
+                    // ============================================
+                    //
+                    // We break sequence adjacency here.
+                    //
+                    // Example:
+                    //
+                    //      A
+                    //      CSR
+                    //      N
+                    //
+                    // must NOT become:
+                    //
+                    //      AN
+                    //
+                    // because A and N were not consecutive retired
+                    // B/L/S/A/N instructions in the architectural
+                    // instruction stream.
+                    // ============================================
+
+                    if (current_class == TMH_NONE) begin
+
+                        history_class_d = TMH_NONE;
+                        history_valid_d = 1'b0;
+
+                    end else begin
+
+
+                        // ========================================
+                        // Previous valid instruction exists
+                        // ========================================
+
+                        if (history_valid_d) begin
+
+                            // ------------------------------------
+                            // Convert XY into a 0..24 index.
+                            //
+                            // With:
+                            //
+                            //      B = 0
+                            //      L = 1
+                            //      S = 2
+                            //      A = 3
+                            //      N = 4
+                            //
+                            // index =
+                            //
+                            //      previous * 5 + current
+                            //
+                            // Examples:
+                            //
+                            // BB = 0*5 + 0 = 0
+                            // LL = 1*5 + 1 = 6
+                            // AN = 3*5 + 4 = 19
+                            // NN = 4*5 + 4 = 24
+                            // ------------------------------------
+
+                            pair_idx =
+                                tmh_pair_index(
+                                    history_class_d,
+                                    current_class
+                                );
+
+
+                            // ------------------------------------
+                            // Increment corresponding TMH event.
+                            //
+                            // This is ADDITION, not assignment to 1.
+                            //
+                            // That distinction is important when
+                            // two retirement ports create the same
+                            // sequence in one cycle.
+                            //
+                            // Example:
+                            //
+                            // history = L
+                            // port0   = L
+                            // port1   = L
+                            //
+                            // tmh_inc_o[TMH_LL] becomes 2.
+                            // ------------------------------------
+
+                            tmh_inc_o[pair_idx] =
+                                tmh_inc_o[pair_idx]
+                                + TmhIncWidth'(1);
+
+                        end
+
+
+                        // ========================================
+                        // Current instruction becomes history
+                        // ========================================
+
+                        history_class_d = current_class;
+                        history_valid_d = 1'b1;
+
+                    end
+
+                end
+
+                // ------------------------------------------------
+                // If commit_ack_i[p] == 0:
+                //
+                // this is simply a bubble / no retirement.
+                //
+                // We intentionally do NOT clear history.
+                //
+                // Example:
+                //
+                // cycle 1 : A retires
+                // cycle 2 : nothing retires
+                // cycle 3 : N retires
+                //
+                // Architectural sequence is still A -> N.
+                // ------------------------------------------------
+
             end
 
-            // The current committed class becomes the predecessor for the
-            // next committed instruction, including a later port this cycle.
-            history_class_d = instr_class[p];
-            history_valid_d = 1'b1;
-          end
         end
-      end
+
     end
-  end
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin : p_history_ff
-    if (!rst_ni) begin
-      history_class_q <= TMH_CLASS_NONE;
-      history_valid_q <= 1'b0;
-    end else begin
-      history_class_q <= history_class_d;
-      history_valid_q <= history_valid_d;
+
+    // ============================================================
+    // History registers
+    // ============================================================
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+
+            history_class_q <= TMH_NONE;
+            history_valid_q <= 1'b0;
+
+        end else begin
+
+            history_class_q <= history_class_d;
+            history_valid_q <= history_valid_d;
+
+        end
     end
-  end
 
-  // (The original tracker also exposed history_class_o/history_valid_o as
-  // debug-only outputs, but tmh_event_gen never wired them to anything
-  // outside itself -- they dead-ended at that module boundary. Dropped
-  // here; history_class_q/history_valid_q are still directly visible to a
-  // waveform dump, one hierarchy level shallower than before.)
-
-  // --------------------------------------------------------------------------
-  // Stage 3 (combinational) -- was tmh_sequence_matcher.sv, unchanged logic.
-  // No architectural state. Reports how many times each sequence occurred
-  // this cycle (can be >1 on a superscalar commit cycle).
-  // --------------------------------------------------------------------------
-  always_comb begin : p_match
-    tmh_inc_o = '0;
-
-    for (int unsigned p = 0; p < NrCommitPorts; p++) begin
-      if (pair_valid[p]) begin
-
-        // TMH 0: LL = LOAD -> LOAD
-        if ((pair_prev[p] == TMH_CLASS_LOAD) &&
-            (pair_curr[p] == TMH_CLASS_LOAD)) begin
-          tmh_inc_o[TMH_LL_IDX] = tmh_inc_o[TMH_LL_IDX] + 1'b1;
-        end
-
-        // TMH 1: AN = ARITHMETIC -> BOOLEAN
-        if ((pair_prev[p] == TMH_CLASS_ARITH) &&
-            (pair_curr[p] == TMH_CLASS_BOOL)) begin
-          tmh_inc_o[TMH_AN_IDX] = tmh_inc_o[TMH_AN_IDX] + 1'b1;
-        end
-
-        // TMH 2: AS = ARITHMETIC -> STORE
-        if ((pair_prev[p] == TMH_CLASS_ARITH) &&
-            (pair_curr[p] == TMH_CLASS_STORE)) begin
-          tmh_inc_o[TMH_AS_IDX] = tmh_inc_o[TMH_AS_IDX] + 1'b1;
-        end
-      end
-    end
-  end
-
-  // Simulation-only configuration checks (kept from tmh_sequence_matcher.sv;
-  // NrPairs there is exactly NrCommitPorts here, since matching now happens
-  // directly on this module's own ports instead of a separate NrPairs param).
-  // pragma translate_off
-  initial begin
-    assert (NrCommitPorts >= 1)
-      else $fatal(1, "tmh_event_gen: NrCommitPorts must be >= 1");
-
-    assert ((2**TmhIncWidth) > NrCommitPorts)
-      else $fatal(1, "tmh_event_gen: TmhIncWidth is too small");
-  end
-  // pragma translate_on
 
 endmodule
