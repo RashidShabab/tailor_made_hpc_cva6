@@ -37,8 +37,9 @@ module tmh_event_gen
   import ariane_pkg::*;
   import tmh_pkg::*;
 #(
-    parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
-
+//    parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
+     
+      parameter int unsigned NrCommitPorts = 2
     // Scoreboard entry type from CVA6
     parameter type scoreboard_entry_t = logic,
 
@@ -46,10 +47,16 @@ module tmh_event_gen
     //
     // NrCommitPorts = 1 -> width 1
     // NrCommitPorts = 2 -> width 2, can represent 0/1/2
-    parameter int unsigned TmhIncWidth =
-        (CVA6Cfg.NrCommitPorts <= 1)
+//    parameter int unsigned TmhIncWidth =
+//        (CVA6Cfg.NrCommitPorts <= 1)
+//            ? 1
+//            : $clog2(CVA6Cfg.NrCommitPorts + 1)
+
+     parameter int unsigned TmhIncWidth =
+        (NrCommitPorts <= 1)
             ? 1
-            : $clog2(CVA6Cfg.NrCommitPorts + 1)
+            : $clog2(NrCommitPorts + 1)
+
 ) (
 
     input logic clk_i,
@@ -59,10 +66,10 @@ module tmh_event_gen
     // Commit interface from CVA6 scoreboard / commit stage
     // ------------------------------------------------------------
 
-    input scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0]
+    input scoreboard_entry_t [NrCommitPorts-1:0]
         commit_instr_i,
 
-    input logic [CVA6Cfg.NrCommitPorts-1:0]
+    input logic [NrCommitPorts-1:0]
         commit_ack_i,
 
     // ------------------------------------------------------------
@@ -312,7 +319,7 @@ module tmh_event_gen
 
             for (
                 int unsigned p = 0;
-                p < CVA6Cfg.NrCommitPorts;
+                p < NrCommitPorts;
                 p++
             ) begin
 
