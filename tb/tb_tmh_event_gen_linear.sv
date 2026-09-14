@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-module tb_tmh_event_gen;
+module tb_tmh_event_gen_linear;
 
   import ariane_pkg::*;
   import tmh_pkg::*;
@@ -8,15 +8,12 @@ module tb_tmh_event_gen;
   // ------------------------------------------------------------
   // Standalone test configuration: two commit ports
   // ------------------------------------------------------------
-  localparam config_pkg::cva6_cfg_t TestCfg = '{
-    default: '0,
-    NrCommitPorts: 2
-  };
+  localparam int unsigned NrCommitPorts = 2;
 
   localparam int unsigned TmhIncWidth =
-      (TestCfg.NrCommitPorts <= 1)
+      (NrCommitPorts <= 1)
           ? 1
-          : $clog2(TestCfg.NrCommitPorts + 1);
+          : $clog2(NrCommitPorts + 1);
 
   // Minimal scoreboard entry for this unit test.
   // tmh_event_gen only needs .fu and .op.
@@ -29,8 +26,8 @@ module tb_tmh_event_gen;
   logic rst_ni;
   logic clear_history_i;
 
-  test_scoreboard_entry_t [TestCfg.NrCommitPorts-1:0] commit_instr_i;
-  logic [TestCfg.NrCommitPorts-1:0]                   commit_ack_i;
+  test_scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_i;
+  logic [NrCommitPorts-1:0]                   commit_ack_i;
 
   logic [TmhIncWidth-1:0] tmh_inc_o [TMH_NUM_PAIRS];
 
@@ -61,7 +58,7 @@ module tb_tmh_event_gen;
   // DUT
   // ------------------------------------------------------------
   tmh_event_gen #(
-    .CVA6Cfg            (TestCfg),
+    .NrCommitPorts      (NrCommitPorts),
     .scoreboard_entry_t (test_scoreboard_entry_t),
     .TmhIncWidth        (TmhIncWidth)
   ) dut (
@@ -232,7 +229,7 @@ module tb_tmh_event_gen;
   // ------------------------------------------------------------
   initial begin
     $dumpfile("tmh_event_gen.vcd");
-    $dumpvars(0, tb_tmh_event_gen);
+    $dumpvars(0, tb_tmh_event_gen_linear);
   end
 
   // ------------------------------------------------------------
