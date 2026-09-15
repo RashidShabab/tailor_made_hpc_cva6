@@ -119,7 +119,41 @@ package tmh_pkg;
 
   localparam int unsigned TMH_NUM_PAIRS = TMH_NUM_CLASSES * TMH_NUM_CLASSES;  // 25
 
+// CSR addresses, machine custom read/write range (0x7C0-0x7FF).
 
+// 0x7C0/0x7C1/0x7C2 are real CVA6's CSR_ICACHE/CSR_DCACHE/CSR_ACC_CONS.
+
+// 0x7C3-0x7C7 are this block's window; 0x7C8-0x7FF stay free for DFDTMH.
+
+  localparam logic [11:0] TMH_CTRL_ADDR   = 12'h7C3;
+  
+  localparam logic [11:0] TMH_SEL_ADDR    = 12'h7C4;
+  
+  localparam logic [11:0] TMH_CNT_LO_ADDR = 12'h7C5;
+  
+  localparam logic [11:0] TMH_CNT_HI_ADDR = 12'h7C6;
+  
+  localparam logic [11:0] TMH_INFO_ADDR   = 12'h7C7;
+
+ 
+
+// TMH_SEL is 5 bits (covers 0-31); only 0-24 are legal indices into the
+
+// 25-entry matrix. Out-of-range writes clamp to this value (WARL --
+
+// write-any-read-legal, must never trap per RISC-V CSR convention).
+
+  localparam logic [4:0]  TMH_SEL_MAX        = 5'd24;
+
+ 
+
+// TMH_INFO fixed fields -- let software discover the matrix size and
+
+// register-layout revision instead of hardcoding either.
+
+  localparam logic [7:0]  TMH_INFO_NUM_PAIRS = 8'(TMH_NUM_PAIRS); // = 25
+
+  localparam logic [7:0]  TMH_INFO_VERSION   = 8'd1;
 
 endpackage
 
