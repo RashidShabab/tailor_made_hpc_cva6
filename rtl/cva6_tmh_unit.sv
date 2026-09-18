@@ -92,7 +92,7 @@ module cva6_tmh_unit
 
     // Unpacked on purpose -- see file header note.
 
-    input  scoreboard_entry_t                commit_instr_i [NrCommitPorts],
+    input  scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_i,
 
     input  logic              [NrCommitPorts-1:0] commit_ack_i,
 
@@ -132,15 +132,11 @@ module cva6_tmh_unit
 
   scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_packed;
 
-  always_comb begin
-
-    for (int unsigned p = 0; p < NrCommitPorts; p++) begin
-
-      commit_instr_packed[p] = commit_instr_i[p];
-
+  generate
+    for (genvar p = 0; p < NrCommitPorts; p++) begin : g_commit_instr_repack
+      assign commit_instr_packed[p] = commit_instr_i[p];
     end
-
-  end
+  endgenerate
 
  
 

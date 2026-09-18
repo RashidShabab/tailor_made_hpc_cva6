@@ -110,7 +110,7 @@ module tb_cva6_tmh_unit;
 
   // parameter-type ports, not a style choice).
 
-  test_scoreboard_entry_t commit_instr_i [NrCommitPorts];
+  test_scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_i;
 
   logic                    [NrCommitPorts-1:0] commit_ack_i;
 
@@ -809,5 +809,6 @@ module tb_cva6_tmh_unit;
   end
 
  
+
 
 endmodule
