@@ -16,47 +16,26 @@
 
 //
 
-// PACKING NOTE (real Xcelium 25.03-s013 TYCMPAT bug, fixed here):
-
-// commit_instr_i is deliberately declared UNPACKED (dimension AFTER the
-
-// identifier) rather than mirroring tmh_event_gen's own packed-style
-
-// declaration (dimension BEFORE the identifier). Real Xcelium elaborates
-
-// a `parameter type` port combined with a dimension-before-identifier as
-
-// an UNPACKED array regardless of what the type resolves to -- it only
-
-// treats that form as packed when the type is already concrete at the
-
-// declaration site (e.g. a plain local variable of a fixed struct type).
-
-// tmh_event_gen's own port genuinely IS packed (confirmed by the same
-
-// error), so an explicit repack loop below builds that shape via
-
-// elementwise assignment rather than relying on an implicit port-shape
-
-// conversion, which is exactly what failed. Same root cause as the
-
-// earlier Verilator "parameter type + array" workaround in
-
-// tmh-event-gen-verilator-check.md, different tool.
-
+// PACKING NOTE (reconciled 2026-09-18, see tmh-tycmpat-reconciliation.md):
+// commit_instr_i is PACKED (dimension BEFORE the identifier), matching
+// tmh_event_gen's own port style directly -- no repack needed. A prior
+// Xcelium 25.03-s013 TYCMPAT failure here was originally attributed to a
+// tool quirk ("Xcelium silently unpacks a parameter-type packed-syntax
+// port"), but re-reading that failure's raw error text shows the RTL
+// port was already packed at the time and the *testbench's* local
+// variable was the unpacked one -- an ordinary shape mismatch between
+// two files that weren't kept in sync, not a tool-specific behavior.
+// Confirmed clean on both Verilator 5.008 and real Cadence Xcelium
+// 25.03-s013 with both sides declared packed and consistent. The
+// operative rule: keep both ends of every port connection declared
+// with matching packed/unpacked shape -- nothing more exotic to design
+// around.
 //
-
-// CAVEAT for the real perf_counters.sv integration: if its own
-
-// commit_instr_i turns out to be declared packed (plausible, matching
-
-// tmh_event_gen/real cva6.sv style) when this is wired in for real, that
-
-// outer boundary may need the same kind of explicit repack, or this
-
-// port's form flipped -- re-check against real Xcelium output or real
-
-// source then, don't assume it carries over automatically.
+// CAVEAT for the real perf_counters.sv integration: this hasn't been
+// run on any simulator yet. perf_counters.sv's own commit_instr_i is
+// already packed, so a direct packed-to-packed connection should work,
+// but verify against a real simulator when that step happens -- don't
+// carry this conclusion over by assumption alone.
 
 // -----------------------------------------------------------------------------
 
@@ -90,7 +69,7 @@ module cva6_tmh_unit
 
     // Commit stream, straight from perf_counters.sv's own ports.
 
-    // Unpacked on purpose -- see file header note.
+    // Packed, matching tmh_event_gen's own port style -- see file header note.
 
     input  scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_i,
 
@@ -126,18 +105,6 @@ module cva6_tmh_unit
 
  
 
-  // Explicit repack for tmh_event_gen's packed commit_instr_i port --
-
-  // see file header note.
-
-  scoreboard_entry_t [NrCommitPorts-1:0] commit_instr_packed;
-
-  generate
-    for (genvar p = 0; p < NrCommitPorts; p++) begin : g_commit_instr_repack
-      assign commit_instr_packed[p] = commit_instr_i[p];
-    end
-  endgenerate
-
  
 
   // Unchanged, already Xcelium-verified against 11 directed tests
@@ -158,7 +125,7 @@ module cva6_tmh_unit
 
       .rst_ni          (rst_ni),
 
-      .commit_instr_i  (commit_instr_packed),
+      .commit_instr_i  (commit_instr_i),
 
       .commit_ack_i    (commit_ack_i),
 
