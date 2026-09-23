@@ -4,19 +4,26 @@
 
  
 
-TOP    := tb_tmh_event_gen_linear
+TOP    ?= tb_tmh_event_gen_linear
 
 FILES  := files.f
 
-XRUN   := xrun -sv -access +rwc -timescale 1ns/1ps -f $(FILES)
+XRUN   := xrun -sv -access +rwc -timescale 1ns/1ps -f $(FILES) -top $(TOP)
 
  
 
-.PHONY: all sim gui clean
+.PHONY: all sim gui clean verilator cva6-integration
 
  
 
 all: sim
+
+verilator:
+	bash run_verilator.sh
+
+cva6-integration:
+	bash run_cva6_integration.sh enabled
+	bash run_cva6_integration.sh disabled
 
  
 

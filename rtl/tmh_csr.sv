@@ -16,17 +16,11 @@
 
 //
 
-// Generic CSR bus convention matches perf_counters.sv's own existing
-
-// addr_i/we_i/data_i/data_o ports directly -- see
-
-// tmh-rtl-architecture-reference.md and
-
-// tmh-25event-csr-integration-spec.md for the additive hook-in (one
-
-// instance of cva6_tmh_unit + one OR'd address-hit term, no change to
-
-// perf_counters.sv's existing generic-counter logic).
+// Uses the same generic addr/we/data CSR bus that csr_regfile drives into
+// perf_counters.sv. In cva6.sv, csr_addr_hit_o selects this block's read
+// data over the HPM bank's and masks HPM writes to the TMH window;
+// csr_regfile routes 0x7C3-0x7C7 only when TmhEn=1 (else illegal-instr).
+// perf_counters.sv itself is unchanged.
 
 //
 

@@ -19,7 +19,11 @@
 
 // A 6th class, TMH_X, is used internally by the classifier for anything
 
-// outside this alphabet (CSR, FPU, AMO, accelerator, ...). TMH_X is never
+// outside this alphabet (CSR/system/fence, FPU arithmetic, accelerator,
+
+// ...). Classification is by decoded .fu, so AMOs (fu=STORE) count as S
+
+// and FP loads/stores (fu=LOAD/STORE) count as L/S. TMH_X is never
 
 // paired -- it only breaks sequence history, the same way TMH_CLASS_NONE
 

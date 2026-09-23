@@ -1,0 +1,154 @@
+diff --git a/core/Flist.cva6 b/core/Flist.cva6
+index 851153315..c8316de53 100644
+--- a/core/Flist.cva6
++++ b/core/Flist.cva6
+@@ -93,6 +93,7 @@ ${CVA6_REPO_DIR}/core/include/ariane_pkg.sv
+ ${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_pkg.sv
+ 
+ // Packages
++${CVA6_REPO_DIR}/core/tmh/tmh_pkg.sv
+ ${CVA6_REPO_DIR}/core/include/wt_cache_pkg.sv
+ ${CVA6_REPO_DIR}/core/include/std_cache_pkg.sv
+ ${CVA6_REPO_DIR}/core/include/instr_tracer_pkg.sv
+@@ -131,6 +132,10 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/counter.sv
+ ${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/delta_counter.sv
+ 
+ // Top-level source files (not necessarily instantiated at the top of the cva6).
++${CVA6_REPO_DIR}/core/tmh/tmh_event_gen.sv
++${CVA6_REPO_DIR}/core/tmh/tmh_counter_bank.sv
++${CVA6_REPO_DIR}/core/tmh/tmh_csr.sv
++${CVA6_REPO_DIR}/core/tmh/cva6_tmh_unit.sv
+ ${CVA6_REPO_DIR}/core/cva6.sv
+ ${CVA6_REPO_DIR}/core/cva6_rvfi_probes.sv
+ ${CVA6_REPO_DIR}/core/alu.sv
+diff --git a/core/csr_regfile.sv b/core/csr_regfile.sv
+index f6ed1ecf5..30969191d 100644
+--- a/core/csr_regfile.sv
++++ b/core/csr_regfile.sv
+@@ -24,7 +24,8 @@ module csr_regfile
+     parameter type                   rvfi_probes_csr_t  = logic,
+     parameter int                    VmidWidth          = 1,
+     parameter int unsigned           MHPMCounterNum     = 6,
+-    parameter int unsigned           N_Triggers         = 4
++    parameter int unsigned           N_Triggers         = 4,
++    parameter bit                    TmhEn              = 1'b0
+ ) (
+     // Subsystem Clock - SUBSYSTEM
+     input logic clk_i,
+@@ -887,6 +888,12 @@ module csr_regfile
+         end
+ 
+         // custom (non RISC-V) cache control
++        tmh_pkg::TMH_CTRL_ADDR, tmh_pkg::TMH_SEL_ADDR,
++        tmh_pkg::TMH_CNT_LO_ADDR, tmh_pkg::TMH_CNT_HI_ADDR,
++        tmh_pkg::TMH_INFO_ADDR: begin
++          if (TmhEn) csr_rdata = perf_data_i;
++          else read_access_exception = 1'b1;
++        end
+         riscv::CSR_DCACHE: csr_rdata = dcache_q;
+         riscv::CSR_ICACHE: csr_rdata = icache_q;
+         // custom (non RISC-V) accelerator memory consistency mode
+@@ -1915,6 +1922,14 @@ module csr_regfile
+           else update_access_exception = 1'b1;
+         end
+ 
++        tmh_pkg::TMH_CTRL_ADDR, tmh_pkg::TMH_SEL_ADDR,
++        tmh_pkg::TMH_CNT_LO_ADDR, tmh_pkg::TMH_CNT_HI_ADDR,
++        tmh_pkg::TMH_INFO_ADDR: begin
++          if (TmhEn) begin
++            perf_we_o = 1'b1;
++            perf_data_o = csr_wdata;
++          end else update_access_exception = 1'b1;
++        end
+         riscv::CSR_DCACHE: dcache_d = csr_wdata;  // enable bit
+         riscv::CSR_ICACHE: icache_d = {{CVA6Cfg.XLEN - 1{1'b0}}, csr_wdata[0]};  // enable bit
+         riscv::CSR_ACC_CONS: begin
+diff --git a/core/cva6.sv b/core/cva6.sv
+index 5b7c505e7..1993a3ad2 100644
+--- a/core/cva6.sv
++++ b/core/cva6.sv
+@@ -318,7 +318,9 @@ module cva6
+     parameter type cvxif_req_t =
+     `CVXIF_REQ_T(CVA6Cfg, x_compressed_req_t, x_issue_req_t, x_register_t, x_commit_t),
+     parameter type cvxif_resp_t =
+-    `CVXIF_RESP_T(CVA6Cfg, x_compressed_resp_t, x_issue_resp_t, x_result_t)
++    `CVXIF_RESP_T(CVA6Cfg, x_compressed_resp_t, x_issue_resp_t, x_result_t),
++    // Optional research monitor; appended to preserve positional parameters.
++    parameter bit TmhEn = 1'b0
+ ) (
+     // Subsystem Clock - SUBSYSTEM
+     input logic clk_i,
+@@ -632,6 +634,8 @@ module cva6
+   // ----------------------------
+   logic [11:0] addr_csr_perf;
+   logic [CVA6Cfg.XLEN-1:0] data_csr_perf, data_perf_csr;
++  logic [CVA6Cfg.XLEN-1:0] data_hpm_csr, data_tmh_csr;
++  logic tmh_addr_hit;
+   logic we_csr_perf;
+ 
+   logic icache_flush_ctrl_cache;
+@@ -1212,6 +1216,7 @@ module cva6
+   end
+ 
+   csr_regfile #(
++      .TmhEn             (TmhEn),
+       .CVA6Cfg           (CVA6Cfg),
+       .exception_t       (exception_t),
+       .jvt_t             (jvt_t),
+@@ -1335,6 +1340,35 @@ module cva6
+   // ------------------------
+   // Performance Counters
+   // ------------------------
++  // Keep the security monitor outside the architectural HPM counter bank.
++  // commit_ack excludes cancelled scoreboard entries and macro intermediates.
++  assign data_perf_csr = tmh_addr_hit ? data_tmh_csr : data_hpm_csr;
++  if (TmhEn) begin : gen_tmh
++    cva6_tmh_unit #(
++        .NrCommitPorts(CVA6Cfg.NrCommitPorts),
++        .scoreboard_entry_t(scoreboard_entry_t),
++        .CsrDataWidth(CVA6Cfg.XLEN)
++    ) i_tmh (
++        .clk_i, .rst_ni,
++        .commit_instr_i(commit_instr_id_commit),
++        .commit_ack_i(commit_ack),
++        .addr_i(addr_csr_perf),
++        // Only a successfully retired CSR may change monitor state.
++        .we_i(we_csr_perf && commit_ack[0]),
++        .data_i(data_csr_perf),
++        .csr_rdata_o(data_tmh_csr),
++        .csr_addr_hit_o(tmh_addr_hit)
++    );
++    // Zcmp macro classification requires a separate architectural policy.
++    // pragma translate_off
++    initial assert (!CVA6Cfg.RVZCMP)
++      else $fatal(1, "TMH integration does not yet support Zcmp macro instructions");
++    // pragma translate_on
++  end else begin : gen_no_tmh
++    assign data_tmh_csr = '0;
++    assign tmh_addr_hit = 1'b0;
++  end
++
+   if (CVA6Cfg.PerfCounterEn) begin : gen_perf_counter
+     perf_counters #(
+         .CVA6Cfg(CVA6Cfg),
+@@ -1350,9 +1384,9 @@ module cva6
+         .rst_ni        (rst_ni),
+         .debug_mode_i  (debug_mode),
+         .addr_i        (addr_csr_perf),
+-        .we_i          (we_csr_perf),
++        .we_i          (we_csr_perf && !tmh_addr_hit),
+         .data_i        (data_csr_perf),
+-        .data_o        (data_perf_csr),
++        .data_o        (data_hpm_csr),
+         .commit_instr_i(commit_instr_id_commit),
+         .commit_ack_i  (commit_ack),
+ 
+@@ -1377,7 +1411,7 @@ module cva6
+     );
+   end : gen_perf_counter
+   else begin : gen_no_perf_counter
+-    assign data_perf_csr = '0;
++    assign data_hpm_csr = '0;
+   end : gen_no_perf_counter
+ 
+   // ------------

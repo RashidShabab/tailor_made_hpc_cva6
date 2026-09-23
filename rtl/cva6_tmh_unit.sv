@@ -6,13 +6,10 @@
 
 // Top-level wrapper for the TMH 25-event transition-matrix counter block.
 
-// This is the single instantiation point inside perf_counters.sv -- ties
-
-// together the already-Xcelium-verified tmh_event_gen (unchanged) with
-
-// the two new modules (tmh_counter_bank, tmh_csr) per
-
-// tmh-25event-csr-integration-spec.md.
+// Instantiated once in core/cva6.sv (generate block gen_tmh, enabled by
+// the TmhEn parameter), alongside -- not inside -- perf_counters.sv. Ties
+// together tmh_event_gen, tmh_counter_bank and tmh_csr per
+// tmh-25event-csr-integration-spec.md. See integration/README.md.
 
 //
 
@@ -31,11 +28,11 @@
 // with matching packed/unpacked shape -- nothing more exotic to design
 // around.
 //
-// CAVEAT for the real perf_counters.sv integration: this hasn't been
-// run on any simulator yet. perf_counters.sv's own commit_instr_i is
-// already packed, so a direct packed-to-packed connection should work,
-// but verify against a real simulator when that step happens -- don't
-// carry this conclusion over by assumption alone.
+// Full-core integration: commit_instr_i is driven packed-to-packed from
+// cva6.sv's commit_instr_id_commit, and commit_ack_i from the filtered
+// commit_ack (excludes dropped entries and Zcmp macro intermediates).
+// Validated in the directed full-core regression (Verilator 5.032,
+// cv64a6_imafdc_sv39, CVA6 81245a47) -- see integration/README.md.
 
 // -----------------------------------------------------------------------------
 
