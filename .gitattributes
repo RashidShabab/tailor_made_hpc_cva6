@@ -1,0 +1,4 @@
+# Keep LF in the repository and working tree so shell scripts run under WSL/Linux
+* text=auto eol=lf
+*.pdf binary
+*.vcd binary

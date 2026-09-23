@@ -1,2 +1,10 @@
 sim/*.vcd
 sim/obj_dir/
+sim/build/
+
+# Local-only research material (not for the public repo)
+references/
+AGENTS.md
+docs/
+notes/
+verification/
