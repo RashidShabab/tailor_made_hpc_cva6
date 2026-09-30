@@ -71,6 +71,11 @@ make cva6-integration                # TMH enabled (scenarios 0,2,3,4) and disab
   (Verilator 5.032; the event generator was also run on Xcelium 25.03).
 - Full core: the directed regression passes on `cv64a6_imafdc_sv39` (RV64, 2 commit ports,
   FPU on, Zcmp off) at upstream CVA6 `81245a47`.
+- Phase-1 classification semantics are frozen in
+  [CLASSIFICATION_POLICY.md](CLASSIFICATION_POLICY.md).  This is the required
+  definition for reporting any trace collected from the current RTL.
+- The provisional Experiment 0/1 simulator, classification, and trap-boundary
+  semantics are recorded in [SEMANTICS_BASELINE.md](SEMANTICS_BASELINE.md).
 - Not yet covered: interrupts/trap-boundary policy, classifying the special
   instruction types (AMO, FP memory, Zbb), overflow tests, RV32 and other configs,
   Zcmp, and area/timing measurement.
