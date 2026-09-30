@@ -7,4 +7,6 @@ references/
 AGENTS.md
 docs/
 notes/
-verification/
+verification/*
+!verification/golden_model.py
+!verification/EXP0_EVIDENCE.md
